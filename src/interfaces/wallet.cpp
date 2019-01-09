@@ -75,10 +75,12 @@ WalletTx MakeWalletTx(CWallet& wallet, const CWalletTx& wtx)
     WalletTx result;
     result.tx = wtx.tx;
     auto txid = wtx.tx->GetHash();
+    bool fHasRecord = false;
     if (wtx.tx->HasBlindedValues()) {
         auto panonwallet = wallet.GetAnonWallet();
         if (panonwallet->mapRecords.count(txid)) {
             result.rtx = panonwallet->mapRecords.at(txid);
+            fHasRecord = true;
         }
     }
 
@@ -91,24 +93,29 @@ WalletTx MakeWalletTx(CWallet& wallet, const CWalletTx& wtx)
             fInputsFromMe = true;
     }
     result.txout_is_mine.reserve(wtx.tx->vpout.size());
-    result.txout_address.reserve(wtx.tx->vpout.size());
+    if (!fHasRecord)
+        result.txout_address.reserve(wtx.tx->vpout.size());
+    else
+        result.txout_address.reserve(result.rtx.vout.size());
     result.txout_address_is_mine.reserve(wtx.tx->vpout.size());
     for (unsigned int i = 0; i < wtx.tx->vpout.size(); i++) {
         auto txout = wtx.tx->vpout[i];
         auto ismine = wallet.IsMine(txout.get());
         result.txout_is_mine.emplace_back(ismine);
-        result.txout_address.emplace_back();
-        CScript scriptPubKey;
-        auto fAddressIsMine = ismine;
-        if (txout->GetScriptPubKey(scriptPubKey)) {
-            result.txout_address_is_mine.emplace_back(
-                    ExtractDestination(scriptPubKey, result.txout_address.back()) ?
-                    IsMine(wallet, result.txout_address.back()) :
-                    ISMINE_NO);
-        } else {
-            if (txout->nVersion == OUTPUT_DATA && fInputsFromMe)
-                fAddressIsMine = ISMINE_SPENDABLE;
-            result.txout_address_is_mine.emplace_back(fAddressIsMine);
+        if (!fHasRecord) {
+            result.txout_address.emplace_back();
+            CScript scriptPubKey;
+            auto fAddressIsMine = ismine;
+            if (txout->GetScriptPubKey(scriptPubKey)) {
+                result.txout_address_is_mine.emplace_back(
+                        ExtractDestination(scriptPubKey, result.txout_address.back()) ?
+                        IsMine(wallet, result.txout_address.back()) :
+                        ISMINE_NO);
+            } else {
+                if (txout->nVersion == OUTPUT_DATA && fInputsFromMe)
+                    fAddressIsMine = ISMINE_SPENDABLE;
+                result.txout_address_is_mine.emplace_back(fAddressIsMine);
+            }
         }
 
         /** RingCT/CT/Data Output **/
@@ -149,6 +156,36 @@ WalletTx MakeWalletTx(CWallet& wallet, const CWalletTx& wtx)
                 result.map_anon_value_out.emplace(i, DUMMY_VALUE);
         }
     }
+
+    // Get txout addresses a bit differently for transactions with blinded values
+    if (fHasRecord) {
+        for (unsigned int i = 0; i < result.rtx.vout.size(); i++) {
+            auto &out = result.rtx.vout[i];
+            if (out.IsChange()) {
+                result.txout_address.emplace_back(CNoDestination());
+                continue;
+            }
+
+            CTxDestination address = CNoDestination();
+            if (out.vPath.size() > 0) {
+                if (out.vPath[0] == ORA_STEALTH) {
+                    if (out.vPath.size() < 5) {
+                        LogPrintf("%s: Warning, malformed vPath.\n", __func__);
+                    } else {
+                        CKeyID id;
+                        CStealthAddress sx;
+
+                        if (out.GetStealthID(id) && wallet.GetAnonWallet()->GetStealthAddress(id, sx))
+                            address = sx;
+                    };
+                };
+            } else if (address.type() == typeid(CNoDestination))
+                ExtractDestination(out.scriptPubKey, address);
+
+            result.txout_address.emplace_back(address);
+        }
+    }
+
     result.credit = wtx.GetCredit(ISMINE_ALL);
     result.debit = wtx.GetDebit(ISMINE_ALL);
     result.change = wtx.GetChange();
