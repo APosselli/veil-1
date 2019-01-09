@@ -93,40 +93,70 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
         if (sub.debit != 0)
             sub.debit -= wtx.ct_fee.second;
 
-        if ((nFlags & ORF_OWNED && nFlags & ORF_FROM) || rtx.IsSendToSelf()) {
+        if ((((nFlags & ORF_OWNED) || wtx.is_my_zerocoin_mint) && ((nFlags & ORF_FROM) || wtx.is_my_zerocoin_spend)) ||
+            rtx.IsSendToSelf()) {
+
             sub.debit = -wtx.ct_fee.second;
             sub.credit = 0;
             if (inputType != outputType) {
                 /** Type Conversion **/
                 switch (inputType) {
                     case OUTPUT_STANDARD:
-                        // converting basecoins
-                        if (outputType == OUTPUT_CT)
-                            sub.type = TransactionRecord::ConvertBasecoinToCT;
-                        else if (outputType == OUTPUT_RINGCT)
-                            sub.type = TransactionRecord::ConvertBasecoinToRingCT;
+                        if (wtx.is_my_zerocoin_spend) {
+                            sub.type = TransactionRecord::ConvertZerocoinToCt;
+                        } else {
+                            // converting basecoins
+                            if (outputType == OUTPUT_CT)
+                                sub.type = TransactionRecord::ConvertBasecoinToCT;
+                            else if (outputType == OUTPUT_RINGCT)
+                                sub.type = TransactionRecord::ConvertBasecoinToRingCT;
+                        }
                         break;
                     case OUTPUT_CT:
-                        if (outputType == OUTPUT_RINGCT)
-                            sub.type = TransactionRecord::ConvertCtToRingCT;
-                        else if (outputType == OUTPUT_STANDARD)
-                            sub.type = TransactionRecord::ConvertCtToBasecoin;
+                        if (wtx.is_my_zerocoin_mint) {
+                            sub.type = TransactionRecord::ZeroCoinMintFromCt;
+                        } else {
+                            if (outputType == OUTPUT_RINGCT)
+                                sub.type = TransactionRecord::ConvertCtToRingCT;
+                            else if (outputType == OUTPUT_STANDARD)
+                                sub.type = TransactionRecord::ConvertCtToBasecoin;
+                        }
                         break;
                     case OUTPUT_RINGCT:
-                        if (outputType == OUTPUT_CT)
-                            sub.type = TransactionRecord::ConvertRingCtToCt;
-                        else if (outputType == OUTPUT_STANDARD)
-                            sub.type = TransactionRecord::ConvertRingCtToBasecoin;
+                        if (wtx.is_my_zerocoin_mint) {
+                            sub.type = TransactionRecord::ZeroCoinMintFromRingCt;
+                        } else {
+                            if (outputType == OUTPUT_CT)
+                                sub.type = TransactionRecord::ConvertRingCtToCt;
+                            else if (outputType == OUTPUT_STANDARD)
+                                sub.type = TransactionRecord::ConvertRingCtToBasecoin;
+                        }
                         break;
                     default:
-                        sub.type = TransactionRecord::SendToSelf;
+                        if (wtx.is_my_zerocoin_spend) {
+                            sub.type = TransactionRecord::ConvertZerocoinToCt;
+                        } else {
+                            // converting basecoins
+                            if (outputType == OUTPUT_CT)
+                                sub.type = TransactionRecord::ConvertBasecoinToCT;
+                            else if (outputType == OUTPUT_RINGCT)
+                                sub.type = TransactionRecord::ConvertBasecoinToRingCT;
+                        }
                         break;
                 }
             } else {
                 /** Send to Self **/
                 switch (outputType) {
                     case OUTPUT_STANDARD:
-                        sub.type = TransactionRecord::SendToSelf;
+                        if (wtx.is_my_zerocoin_spend && wtx.is_my_zerocoin_mint) {
+                            sub.type = TransactionRecord::ZeroCoinSpendRemint;
+                        } else if (wtx.is_my_zerocoin_spend) {
+                            sub.type = TransactionRecord::ZeroCoinSpendSelf;
+                        } else if (wtx.is_my_zerocoin_mint) {
+                            sub.type = TransactionRecord::ZeroCoinMint;
+                        } else {
+                            sub.type = TransactionRecord::SendToSelf;
+                        }
                         break;
                     case OUTPUT_CT:
                         sub.type = TransactionRecord::CTSendToSelf;
@@ -154,26 +184,33 @@ QList<TransactionRecord> TransactionRecord::decomposeTransaction(const interface
                     sub.type = TransactionRecord::Generated;
                     break;
             }
+        } else if (((nFlags & ORF_OWNED) || wtx.is_my_zerocoin_mint) && wtx.is_coinstake) {
+            sub.type = TransactionRecord::ZeroCoinStake;
         } else if (nFlags & ORF_OWNED) {
-            switch (outputType) {
-                case OUTPUT_STANDARD:
-                    sub.type = TransactionRecord::RecvWithAddress;
-                    break;
-                case OUTPUT_CT:
-                    sub.type = TransactionRecord::CTRecvWithAddress;
-                    break;
-                case OUTPUT_RINGCT:
-                    sub.type = TransactionRecord::RingCTRecvWithAddress;
-                    break;
-                default:
-                    sub.type = TransactionRecord::RecvWithAddress;
-                    break;
-            }
-        } else if (nFlags & ORF_FROM) {
+                switch (outputType) {
+                    case OUTPUT_STANDARD:
+                        if (wtx.tx->IsZerocoinSpend())
+                            sub.type = TransactionRecord::ZeroCoinRecv;
+                        else
+                            sub.type = TransactionRecord::RecvWithAddress;
+                        break;
+                    case OUTPUT_CT:
+                        sub.type = TransactionRecord::CTRecvWithAddress;
+                        break;
+                    case OUTPUT_RINGCT:
+                        sub.type = TransactionRecord::RingCTRecvWithAddress;
+                        break;
+                    default:
+                        sub.type = TransactionRecord::RecvWithAddress;
+                        break;
+                }
+        } else if ((nFlags & ORF_FROM) || wtx.is_my_zerocoin_spend) {
             if (rtx.nFlags & ORF_ANON_IN)
                 sub.type = TransactionRecord::RingCTSendToAddress;
             else if (rtx.nFlags & ORF_BLIND_IN)
                 sub.type = TransactionRecord::CTSendToAddress;
+            else if (wtx.is_my_zerocoin_spend)
+                sub.type = TransactionRecord::ZeroCoinSpend;
             else
                 sub.type = TransactionRecord::SendToAddress;
         }
